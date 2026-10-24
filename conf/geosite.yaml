@@ -1,0 +1,119 @@
+ads:
+  url: https://raw.githubusercontent.com/appshubcc/bett-rules/meta/geo/geosite/category-ads-all.list
+  format: domain
+  group: ads
+
+dlc-ads:
+  url: https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Geosite.txt
+  format: native
+  group: ads
+
+cdn-domain:
+  url: https://raw.githubusercontent.com/SukkaLab/ruleset.skk.moe/master/Clash/domainset/cdn.txt
+  format: domain
+  group: cdn
+
+cdn-classical:
+  url: https://raw.githubusercontent.com/SukkaLab/ruleset.skk.moe/master/Clash/non_ip/cdn.txt
+  format: text
+  group: cdn
+
+tiktok:
+  url: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/tiktok.list
+  format: domain
+  group: us
+
+diy-jp:
+  url: conf/diy/jp.txt
+  format: domain
+  group: jp
+
+dmm:
+  url: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/dmm.list
+  format: domain
+  group: jp
+
+javdb:
+  url: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/javdb.list
+  format: domain
+  group: hk
+
+apple:
+  url: https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/apple-cn.txt
+  format: native
+  group: apple
+
+cn-apple:
+  url: https://raw.githubusercontent.com/SukkaLab/ruleset.skk.moe/master/Clash/non_ip/apple_cn.txt
+  format: text
+  group: apple
+
+cdn-apple:
+  url: https://raw.githubusercontent.com/SukkaLab/ruleset.skk.moe/master/Clash/domainset/apple_cdn.txt
+  format: domain
+  group: apple
+
+microsoft:
+  url: https://raw.githubusercontent.com/SukkaLab/ruleset.skk.moe/master/Clash/non_ip/microsoft.txt
+  format: text
+  group: microsoft
+
+cdn-microsoft:
+  url: https://raw.githubusercontent.com/SukkaLab/ruleset.skk.moe/master/Clash/non_ip/microsoft_cdn.txt
+  format: text
+  group: microsoft
+
+download-domain:
+  url: https://raw.githubusercontent.com/SukkaLab/ruleset.skk.moe/master/Clash/domainset/download.txt
+  format: domain
+  group: download
+
+download-classical:
+  url: https://raw.githubusercontent.com/SukkaLab/ruleset.skk.moe/master/Clash/non_ip/download.txt
+  format: text
+  group: download
+
+diy-direct:
+  url: conf/diy/direct.txt
+  format: domain
+  group: cn
+
+private:
+  url: https://raw.githubusercontent.com/DustinWin/ruleset_geodata/mihomo-ruleset/private.list
+  format: domain
+  group: cn
+
+fakeip-filter:
+  url: https://raw.githubusercontent.com/DustinWin/ruleset_geodata/mihomo-ruleset/fakeip-filter.list
+  format: domain
+  group: cn
+
+domestic:
+  url: https://raw.githubusercontent.com/SukkaLab/ruleset.skk.moe/master/Clash/non_ip/domestic.txt
+  format: text
+  group: cn
+
+direct-list:
+  url: https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt
+  format: native
+  group: cn
+
+speedtest:
+  url: https://raw.githubusercontent.com/SukkaLab/ruleset.skk.moe/master/Clash/domainset/speedtest.txt
+  format: domain
+  group: cn
+
+dlc-direct:
+  url: https://raw.githubusercontent.com/SukkaLab/ruleset.skk.moe/master/Clash/non_ip/direct.txt
+  format: text
+  group: cn
+
+gfw:
+  url: https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/gfw.txt
+  format: native
+  group: gfw
+
+global:
+  url: https://raw.githubusercontent.com/SukkaLab/ruleset.skk.moe/master/Clash/non_ip/global.txt
+  format: text
+  group: gfw

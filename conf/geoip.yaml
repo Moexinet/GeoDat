@@ -1,0 +1,31 @@
+input:
+  - type: text
+    action: add
+    args:
+      name: cn
+      uri: https://raw.githubusercontent.com/SukkaLab/ruleset.skk.moe/master/Clash/ip/china_ip.txt
+
+  - type: text
+    action: add
+    args:
+      name: cn
+      uri: https://raw.githubusercontent.com/SukkaLab/ruleset.skk.moe/master/Clash/ip/china_ip_ipv6.txt
+
+  - type: text
+    action: add
+    args:
+      name: private
+      uri: https://raw.githubusercontent.com/DustinWin/ruleset_geodata/mihomo-ruleset/privateip.list
+
+output:
+  - type: v2rayGeoIPDat
+    action: output
+    args:
+      outputName: geoip.dat
+      outputDir: ./
+
+  - type: maxmindMMDB
+    action: output
+    args:
+      outputName: geoip.mmdb
+      outputDir: ./
