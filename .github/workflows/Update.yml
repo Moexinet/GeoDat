@@ -1,0 +1,261 @@
+name: Generation Rules
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4,16 * * *'
+  push:
+    branches:
+      - "Files"
+    paths:
+      - "conf/*.yaml"
+      - "conf/diy/*.txt"
+      - ".github/workflows/Update.yml"
+env:
+  TZ: Asia/Shanghai
+  CONF_DIR: ${{ github.workspace }}/conf
+  GEO_OUTPUT_DIR: ${{ github.workspace }}/geo
+  GEOIP_CONF_NAME: geoip
+  GEOSITE_CONF_NAME: geosite
+jobs:
+  GeoIP:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mikefarah/yq@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "stable"
+          cache: false
+      - name: Install geoip cli
+        run: go install -v github.com/Loyalsoldier/geoip@latest
+      - name: Format conversion
+        run: |
+          GEOIP_CONF_FILE=${CONF_DIR}/${GEOIP_CONF_NAME}
+          yq -o json ${GEOIP_CONF_FILE}.yaml > ${GEOIP_CONF_FILE}.json
+          rm -fr ${GEO_OUTPUT_DIR}
+          mkdir -p ${GEO_OUTPUT_DIR}
+          cd ${GEO_OUTPUT_DIR}
+          geoip convert -c ${GEOIP_CONF_FILE}.json
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.GEOIP_CONF_NAME }}
+          path: ${{ env.GEO_OUTPUT_DIR }}/*
+          overwrite: true
+      - name: Clean up
+        run: rm -fr ${GEOIP_CONF_FILE}.json
+  GeoSite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mikefarah/yq@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "stable"
+          cache: false
+      - name: Get geosite repository
+        run: git clone https://github.com/v2fly/domain-list-community.git
+      - name: Convert Rules
+        run: |
+          GEOSITE_CONF_FILE=${CONF_DIR}/${GEOSITE_CONF_NAME}.yaml
+          keys=$(yq e 'keys | .[]' ${GEOSITE_CONF_FILE})
+          rm -fr ${GEO_OUTPUT_DIR}
+          mkdir -p ${GEO_OUTPUT_DIR}
+          cd ./domain-list-community
+          mkdir -p ./tmp
+          rm -fr ./data/*
+          for key in $keys; do
+            url=$(KEY="$key" yq e '.[strenv(KEY)].url' "${GEOSITE_CONF_FILE}")
+            format=$(KEY="$key" yq e '.[strenv(KEY)].format // "yaml"' "${GEOSITE_CONF_FILE}")
+            group=$(KEY="$key" yq e '.[strenv(KEY)].group // ""' "${GEOSITE_CONF_FILE}")
+            if [ -z "$group" ] || [ "$group" == "null" ]; then group="$key"; fi
+            echo "::group::Processing $key -> group: $group (format=$format)"
+            if [[ "$url" == http* ]]; then
+              wget -c -O "./tmp/${key}.raw" "${url}"
+            else
+              local_file="${GITHUB_WORKSPACE}/${url#./}"
+              if [ -f "$local_file" ]; then cp "$local_file" "./tmp/${key}.raw"; else echo "Error: Local file not found: $local_file" >&2; exit 1; fi
+            fi
+            tmpdata="./tmp/${key}.parsed"
+            touch "$tmpdata"
+            case "$format" in
+              yaml)
+                tr -d '\r' < "./tmp/${key}.raw" | yq '.payload.[]' > "$tmpdata"
+                perl -i -ne 'next if /_/; next if /^\s*$/; s/^[^+.*]/full:$&/; s/^\+\.//; print' "$tmpdata"
+                ;;
+              text)
+                tr -d '\r' < "./tmp/${key}.raw" | awk '!/_/ && !/ /' > "./tmp/${key}.filtered"
+                mv "./tmp/${key}.filtered" "./tmp/${key}.raw"
+                awk '
+                  /^[[:space:]]*#/ { next }
+                  /^[[:space:]]*$/  { next }
+                  /^DOMAIN-WILDCARD,/ {
+                    pattern = substr($0, length("DOMAIN-WILDCARD,") + 1)
+                    sub(/[[:space:]]+$/, "", pattern)
+                    if (pattern == "") { next }
+                    temp = pattern
+                    gsub(/[*?.]/, "", temp)
+                    if (temp == "") { next }
+                    gsub(/\./, "\\.", pattern)
+                    gsub(/\*/, ".*", pattern)
+                    gsub(/\?/, ".", pattern)
+                    print "regexp:^" pattern "$"
+                    next
+                  }
+                  /^DOMAIN,/        { pattern=substr($0, length("DOMAIN,")+1);         sub(/[[:space:]]+$/, "", pattern); if(pattern!="") print "full:"   pattern; next }
+                  /^DOMAIN-SUFFIX,/ { pattern=substr($0, length("DOMAIN-SUFFIX,")+1);  sub(/[[:space:]]+$/, "", pattern); if(pattern!="") print "domain:" pattern; next }
+                  /^DOMAIN-KEYWORD,/{ pattern=substr($0, length("DOMAIN-KEYWORD,")+1); sub(/[[:space:]]+$/, "", pattern); if(pattern!="") print "keyword:" pattern; next }
+                  /^DOMAIN-REGEX,/  { pattern=substr($0, length("DOMAIN-REGEX,")+1);   sub(/[[:space:]]+$/, "", pattern); if(pattern!="") print "regexp:" pattern; next }
+                ' "./tmp/${key}.raw" > "$tmpdata"
+                ;;
+              domain)
+                tr -d '\r' < "./tmp/${key}.raw" | awk '!/_/ && !/ /' > "./tmp/${key}.filtered"
+                mv "./tmp/${key}.filtered" "./tmp/${key}.raw"
+                awk '
+                  /^[[:space:]]*#/ { next }
+                  /^[[:space:]]*$/  { next }
+                  /^\+\./  {
+                    pattern = substr($0, 3)
+                    sub(/[[:space:]]+$/, "", pattern)
+                    if (pattern == "") { next }
+                    if (pattern ~ /[*?]/) {
+                      temp = pattern
+                      gsub(/[*?.]/, "", temp)
+                      if (temp == "") { next }
+                      gsub(/\./, "\\.", pattern)
+                      gsub(/\*/, ".*", pattern)
+                      gsub(/\?/, ".", pattern)
+                      print "regexp:^" pattern "$"
+                    } else { print "domain:" pattern }
+                    next
+                  }
+                  /^\+/    {
+                    pattern = substr($0, 2)
+                    sub(/[[:space:]]+$/, "", pattern)
+                    if (pattern == "") { next }
+                    if (pattern ~ /[*?]/) {
+                      temp = pattern
+                      gsub(/[*?.]/, "", temp)
+                      if (temp == "") { next }
+                      gsub(/\./, "\\.", pattern)
+                      gsub(/\*/, ".*", pattern)
+                      gsub(/\?/, ".", pattern)
+                      print "regexp:^" pattern "$"
+                    } else { print "domain:" pattern }
+                    next
+                  }
+                  {
+                    pattern = $0
+                    sub(/[[:space:]]+$/, "", pattern)
+                    if (pattern == "") { next }
+                    if (pattern ~ /[*?]/) {
+                      temp = pattern
+                      gsub(/[*?.]/, "", temp)
+                      if (temp == "") { next }
+                      gsub(/\./, "\\.", pattern)
+                      gsub(/\*/, ".*", pattern)
+                      gsub(/\?/, ".", pattern)
+                      print "regexp:^" pattern "$"
+                    } else { print "full:" pattern }
+                  }
+                ' "./tmp/${key}.raw" > "$tmpdata"
+                ;;
+              native)
+                tr -d '\r' < "./tmp/${key}.raw" | awk '!/_/ && !/ /' > "$tmpdata"
+                ;;
+              *)
+                echo "Unsupported format: $format (key=$key)" >&2
+                exit 1
+                ;;
+            esac
+            awk '
+              /^[[:space:]]*$/ { next }
+              /^(full:|domain:)?[a-zA-Z0-9.-]+$/ { 
+                if ($0 ~ /^\./ || $0 ~ /\.$/ || $0 ~ /\.\./) next;
+                print; next 
+              }
+              /^keyword:[a-zA-Z0-9.-]+$/ { print; next }
+              /^regexp:/ {
+                if ($0 ~ /\^\.\*\$/) next; 
+                print; next
+              }
+            ' "$tmpdata" > "$tmpdata.clean"
+            mv "$tmpdata.clean" "$tmpdata"
+            cat "$tmpdata" >> "./data/${group}"
+            echo "::endgroup::"
+          done
+          for f in ./data/*; do
+            if [ -f "$f" ]; then sort -u "$f" -o "$f"; fi
+          done
+          go mod download
+          go run ./ -outputname=${GEOSITE_CONF_NAME}.dat -outputdir=${GEO_OUTPUT_DIR}
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.GEOSITE_CONF_NAME }}
+          path: ${{ env.GEO_OUTPUT_DIR }}/*
+          overwrite: true
+      - name: Clean up
+        run: rm -fr ./domain-list-community
+  Commit:
+    needs: [GeoIP, GeoSite]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Clean up
+        run: |
+          rm -fr ${{ env.GEO_OUTPUT_DIR }}
+          mkdir -p ${{ env.GEO_OUTPUT_DIR }}
+      - uses: actions/download-artifact@v7
+        with:
+          path: ${{ env.GEO_OUTPUT_DIR }}
+          merge-multiple: true
+      - name: Commit and Force Push (Orphan Branch)
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          GET_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S (UTC+8)')
+          git checkout --orphan latest_branch
+          git add -A
+          git commit -m "Auto Update: ${GET_TIME}"
+          git branch -D Files || true
+          git branch -m Files
+          git push -f origin Files
+  Upload:
+    needs: [GeoIP, GeoSite]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare output dir
+        run: mkdir -p "${GEO_OUTPUT_DIR}"
+      - uses: actions/download-artifact@v7
+        with:
+          path: ${{ env.GEO_OUTPUT_DIR }}
+          merge-multiple: true
+      - name: Force Push to External Repo
+        env:
+          TARGET_REPO: "MoexinCDN/Files"
+          TARGET_BRANCH: "GeoDat"
+          PUSH_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          GET_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S (UTC+8)')
+          shopt -s nullglob
+          files=("${GEO_OUTPUT_DIR}"/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "Error: ${GEO_OUTPUT_DIR} is empty, no artifacts to push" >&2
+            exit 1
+          fi
+          echo "Found ${#files[@]} artifact(s):"
+          printf '  %s\n' "${files[@]}"
+          rm -rf /tmp/push_repo
+          mkdir -p /tmp/push_repo
+          cd /tmp/push_repo
+          git init -q
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name  "github-actions[bot]"
+          cp -a "${GEO_OUTPUT_DIR}/." .
+          ls -la
+          git add -A
+          git commit -m "Auto Update: ${GET_TIME}"
+          git remote add target "https://x-access-token:${PUSH_TOKEN}@github.com/${TARGET_REPO}.git"
+          git push --force target "HEAD:${TARGET_BRANCH}"
