@@ -1,0 +1,424 @@
+name: Generation Rules
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+      timezone: "Asia/Shanghai"
+  push:
+    branches:
+      - "Files"
+    paths:
+      - "conf/*.yaml"
+      - "conf/diy/*.txt"
+      - ".github/workflows/Update.yml"
+env:
+  TZ: Asia/Shanghai
+  CONF_DIR: ${{ github.workspace }}/conf
+  GEO_OUTPUT_DIR: ${{ github.workspace }}/geo
+  GEOIP_CONF_NAME: geoip
+  GEOSITE_CONF_NAME: geosite
+  TOOL_DIR: ${{ github.workspace }}/tool
+  TOOL_BRANCH: Files
+jobs:
+  Tools:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "stable"
+          cache: false
+      - name: Restore cached tools
+        run: |
+          set -euo pipefail
+          mkdir -p "${TOOL_DIR}"
+          if git fetch --depth 1 origin "${TOOL_BRANCH}" 2>/dev/null; then
+            if git ls-tree -d --name-only FETCH_HEAD tool | grep -qx tool; then
+              git checkout FETCH_HEAD -- tool/
+              echo "Restored cached tool/ from origin/${TOOL_BRANCH}"
+            else
+              echo "origin/${TOOL_BRANCH} has no tool/ yet (first run)"
+            fi
+          else
+            echo "origin/${TOOL_BRANCH} not fetchable; rely on current checkout"
+          fi
+      - name: Build upstream tools or fall back to cache
+        run: |
+          set -euo pipefail
+          BUILD_ROOT="${{ runner.temp }}/tool-build"
+          mkdir -p "${BUILD_ROOT}/new" "${BUILD_ROOT}/log"
+          is_valid_bin() {
+            local f="$1"
+            [ -f "$f" ] && [ -s "$f" ] && file -b "$f" | grep -q 'ELF 64-bit.*x86-64'
+          }
+          NAMES=(yq geoip geosite converter)
+          REPOS=(
+            "https://github.com/mikefarah/yq.git"
+            "https://github.com/Loyalsoldier/geoip.git"
+            "https://github.com/v2fly/domain-list-community.git"
+            "https://github.com/MetaCubeX/meta-rules-converter.git"
+          )
+          declare -A STATUS COMMIT
+          missing=()
+          for i in "${!NAMES[@]}"; do
+            name="${NAMES[$i]}"
+            repo="${REPOS[$i]}"
+            src="${BUILD_ROOT}/src-${name}"
+            candidate="${BUILD_ROOT}/new/${name}"
+            log="${BUILD_ROOT}/log/${name}.log"
+            cached="${TOOL_DIR}/${name}"
+            ok=false
+            echo "::group::Tool ${name} <- ${repo}"
+            if timeout 180 git clone --depth 1 "${repo}" "${src}" >"${log}" 2>&1; then
+              if ( cd "${src}" && CGO_ENABLED=0 timeout 420 go build -trimpath -ldflags='-s -w -buildid=' -o "${candidate}" . ) >>"${log}" 2>&1; then
+                if is_valid_bin "${candidate}"; then ok=true; fi
+              fi
+            fi
+            if [ "${ok}" = true ]; then
+              src_commit="$(cd "${src}" && git rev-parse --short HEAD)"
+              COMMIT["${name}"]="${src_commit}"
+              if is_valid_bin "${cached}" && cmp -s "${candidate}" "${cached}"; then
+                STATUS["${name}"]="unchanged"
+                echo "${name}: built ${src_commit}, identical to cache, keep cached file"
+              else
+                cp -f "${candidate}" "${cached}"
+                chmod +x "${cached}"
+                STATUS["${name}"]="updated"
+                echo "${name}: built ${src_commit}, cache replaced"
+              fi
+            else
+              echo "::warning::${name}: upstream unavailable or build failed, falling back to cached binary"
+              tail -n 20 "${log}" || true
+              if is_valid_bin "${cached}"; then
+                STATUS["${name}"]="fallback"
+                COMMIT["${name}"]="(cached)"
+                echo "${name}: using cached binary"
+              else
+                STATUS["${name}"]="missing"
+                COMMIT["${name}"]="-"
+                missing+=("${name}")
+              fi
+            fi
+            echo "::endgroup::"
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::No usable binary for: ${missing[*]}. First run requires ${#NAMES[@]} upstreams to be reachable, or commit prebuilt binaries into tool/."
+            exit 1
+          fi
+          for name in "${NAMES[@]}"; do chmod +x "${TOOL_DIR}/${name}"; done
+          INFO="${TOOL_DIR}/build-info.txt"
+          {
+            echo "built_at=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S (UTC+8)')"
+            echo "go_version=$(go version)"
+            echo "runner_arch=$(uname -m)"
+            for name in "${NAMES[@]}"; do
+              echo "${name}: status=${STATUS[${name}]} upstream_commit=${COMMIT[${name}]} sha256=$(sha256sum "${TOOL_DIR}/${name}" | cut -d' ' -f1)"
+            done
+          } > "${INFO}"
+          cat "${INFO}"
+          echo "::notice::tool status: $(for n in "${NAMES[@]}"; do printf '%s=%s ' "$n" "${STATUS[$n]}"; done)"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: tools
+          path: ${{ env.TOOL_DIR }}/*
+          overwrite: true
+  GeoIP:
+    needs: [Tools]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
+        with:
+          name: tools
+          path: ${{ env.TOOL_DIR }}
+      - name: Prepare tool
+        run: chmod +x "${TOOL_DIR}/yq" "${TOOL_DIR}/geoip"
+      - name: Format conversion
+        run: |
+          GEOIP_CONF_FILE=${CONF_DIR}/${GEOIP_CONF_NAME}
+          "${TOOL_DIR}/yq" -o json ${GEOIP_CONF_FILE}.yaml > ${GEOIP_CONF_FILE}.json
+          rm -fr ${GEO_OUTPUT_DIR}
+          mkdir -p ${GEO_OUTPUT_DIR}
+          cd ${GEO_OUTPUT_DIR}
+          "${TOOL_DIR}/geoip" convert -c ${GEOIP_CONF_FILE}.json
+          sha256sum "${GEOIP_CONF_NAME}.dat" > "${GEOIP_CONF_NAME}.dat.sha256sum"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.GEOIP_CONF_NAME }}
+          path: ${{ env.GEO_OUTPUT_DIR }}/*
+          overwrite: true
+  GeoSite:
+    needs: [Tools]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
+        with:
+          name: tools
+          path: ${{ env.TOOL_DIR }}
+      - name: Prepare tool
+        run: chmod +x "${TOOL_DIR}/yq" "${TOOL_DIR}/geosite"
+      - name: Convert Rules
+        run: |
+          GEOSITE_CONF_FILE=${CONF_DIR}/${GEOSITE_CONF_NAME}.yaml
+          keys=$("${TOOL_DIR}/yq" e 'keys | .[]' ${GEOSITE_CONF_FILE})
+          rm -fr ${GEO_OUTPUT_DIR}
+          mkdir -p ${GEO_OUTPUT_DIR}
+          DLC_DIR="${{ runner.temp }}/dlc"
+          mkdir -p "${DLC_DIR}/data" "${DLC_DIR}/tmp"
+          cd "${DLC_DIR}"
+          for key in $keys; do
+            url=$(KEY="$key" "${TOOL_DIR}/yq" e '.[strenv(KEY)].url' "${GEOSITE_CONF_FILE}")
+            format=$(KEY="$key" "${TOOL_DIR}/yq" e '.[strenv(KEY)].format // "yaml"' "${GEOSITE_CONF_FILE}")
+            group=$(KEY="$key" "${TOOL_DIR}/yq" e '.[strenv(KEY)].group // ""' "${GEOSITE_CONF_FILE}")
+            if [ -z "$group" ] || [ "$group" == "null" ]; then group="$key"; fi
+            echo "::group::Processing $key -> group: $group (format=$format)"
+            if [[ "$url" == http* ]]; then
+              wget -c -O "./tmp/${key}.raw" "${url}"
+            else
+              local_file="${GITHUB_WORKSPACE}/${url#./}"
+              if [ -f "$local_file" ]; then cp "$local_file" "./tmp/${key}.raw"; else echo "Error: Local file not found: $local_file" >&2; exit 1; fi
+            fi
+            tmpdata="./tmp/${key}.parsed"
+            touch "$tmpdata"
+            case "$format" in
+              yaml)
+                tr -d '\r' < "./tmp/${key}.raw" | "${TOOL_DIR}/yq" '.payload.[]' > "$tmpdata"
+                perl -i -ne 'next if /_/; next if /^\s*$/; s/^[^+.*]/full:$&/; s/^\+\.//; print' "$tmpdata"
+                ;;
+              text)
+                tr -d '\r' < "./tmp/${key}.raw" | awk '!/_/ && !/ /' > "./tmp/${key}.filtered"
+                mv "./tmp/${key}.filtered" "./tmp/${key}.raw"
+                awk '
+                  /^[[:space:]]*#/ { next }
+                  /^[[:space:]]*$/  { next }
+                  /^DOMAIN-WILDCARD,/ {
+                    pattern = substr($0, length("DOMAIN-WILDCARD,") + 1)
+                    sub(/[[:space:]]+$/, "", pattern)
+                    if (pattern == "") { next }
+                    temp = pattern
+                    gsub(/[*?.]/, "", temp)
+                    if (temp == "") { next }
+                    gsub(/\./, "\\.", pattern)
+                    gsub(/\*/, ".*", pattern)
+                    gsub(/\?/, ".", pattern)
+                    print "regexp:^" pattern "$"
+                    next
+                  }
+                  /^DOMAIN,/        { pattern=substr($0, length("DOMAIN,")+1);         sub(/[[:space:]]+$/, "", pattern); if(pattern!="") print "full:"   pattern; next }
+                  /^DOMAIN-SUFFIX,/ { pattern=substr($0, length("DOMAIN-SUFFIX,")+1);  sub(/[[:space:]]+$/, "", pattern); if(pattern!="") print "domain:" pattern; next }
+                  /^DOMAIN-KEYWORD,/{ pattern=substr($0, length("DOMAIN-KEYWORD,")+1); sub(/[[:space:]]+$/, "", pattern); if(pattern!="") print "keyword:" pattern; next }
+                  /^DOMAIN-REGEX,/  { pattern=substr($0, length("DOMAIN-REGEX,")+1);   sub(/[[:space:]]+$/, "", pattern); if(pattern!="") print "regexp:" pattern; next }
+                ' "./tmp/${key}.raw" > "$tmpdata"
+                ;;
+              domain)
+                tr -d '\r' < "./tmp/${key}.raw" | awk '!/_/ && !/ /' > "./tmp/${key}.filtered"
+                mv "./tmp/${key}.filtered" "./tmp/${key}.raw"
+                awk '
+                  /^[[:space:]]*#/ { next }
+                  /^[[:space:]]*$/  { next }
+                  /^\+\./  {
+                    pattern = substr($0, 3)
+                    sub(/[[:space:]]+$/, "", pattern)
+                    if (pattern == "") { next }
+                    if (pattern ~ /[*?]/) {
+                      temp = pattern
+                      gsub(/[*?.]/, "", temp)
+                      if (temp == "") { next }
+                      gsub(/\./, "\\.", pattern)
+                      gsub(/\*/, ".*", pattern)
+                      gsub(/\?/, ".", pattern)
+                      print "regexp:^" pattern "$"
+                    } else { print "domain:" pattern }
+                    next
+                  }
+                  /^\+/    {
+                    pattern = substr($0, 2)
+                    sub(/[[:space:]]+$/, "", pattern)
+                    if (pattern == "") { next }
+                    if (pattern ~ /[*?]/) {
+                      temp = pattern
+                      gsub(/[*?.]/, "", temp)
+                      if (temp == "") { next }
+                      gsub(/\./, "\\.", pattern)
+                      gsub(/\*/, ".*", pattern)
+                      gsub(/\?/, ".", pattern)
+                      print "regexp:^" pattern "$"
+                    } else { print "domain:" pattern }
+                    next
+                  }
+                  {
+                    pattern = $0
+                    sub(/[[:space:]]+$/, "", pattern)
+                    if (pattern == "") { next }
+                    if (pattern ~ /[*?]/) {
+                      temp = pattern
+                      gsub(/[*?.]/, "", temp)
+                      if (temp == "") { next }
+                      gsub(/\./, "\\.", pattern)
+                      gsub(/\*/, ".*", pattern)
+                      gsub(/\?/, ".", pattern)
+                      print "regexp:^" pattern "$"
+                    } else { print "full:" pattern }
+                  }
+                ' "./tmp/${key}.raw" > "$tmpdata"
+                ;;
+              native)
+                tr -d '\r' < "./tmp/${key}.raw" | awk '!/_/ && !/ /' > "$tmpdata"
+                ;;
+              *)
+                echo "Unsupported format: $format (key=$key)" >&2
+                exit 1
+                ;;
+            esac
+            awk '
+              /^[[:space:]]*$/ { next }
+              /^(full:|domain:)?[a-zA-Z0-9.-]+$/ { 
+                if ($0 ~ /^\./ || $0 ~ /\.$/ || $0 ~ /\.\./) next;
+                print; next 
+              }
+              /^keyword:[a-zA-Z0-9.-]+$/ { print; next }
+              /^regexp:/ {
+                if ($0 ~ /\^\.\*\$/) next; 
+                print; next
+              }
+            ' "$tmpdata" > "$tmpdata.clean"
+            mv "$tmpdata.clean" "$tmpdata"
+            cat "$tmpdata" >> "./data/${group}"
+            echo "::endgroup::"
+          done
+          for f in ./data/*; do
+            if [ -f "$f" ]; then sort -u "$f" -o "$f"; fi
+          done
+          "${TOOL_DIR}/geosite" --datapath="${DLC_DIR}/data" -outputname=${GEOSITE_CONF_NAME}.dat -outputdir=${GEO_OUTPUT_DIR}
+          (cd "${GEO_OUTPUT_DIR}" && sha256sum "${GEOSITE_CONF_NAME}.dat" > "${GEOSITE_CONF_NAME}.dat.sha256sum")
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.GEOSITE_CONF_NAME }}
+          path: ${{ env.GEO_OUTPUT_DIR }}/*
+          overwrite: true
+  MRS:
+    needs: [GeoIP, GeoSite, Tools]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: ${{ env.GEOIP_CONF_NAME }}
+          path: ${{ env.GEO_OUTPUT_DIR }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: ${{ env.GEOSITE_CONF_NAME }}
+          path: ${{ env.GEO_OUTPUT_DIR }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: tools
+          path: ${{ env.TOOL_DIR }}
+      - name: Prepare tool
+        run: chmod +x "${TOOL_DIR}/converter"
+      - name: Convert dat to mihomo MRS
+        run: |
+          set -euo pipefail
+          MRS_TMP="${{ runner.temp }}/mrs"
+          mkdir -p "${MRS_TMP}/geoip" "${MRS_TMP}/geosite"
+          "${TOOL_DIR}/converter" geoip  -f "${GEO_OUTPUT_DIR}/geoip.dat"  -o "${MRS_TMP}/geoip"
+          "${TOOL_DIR}/converter" geosite -f "${GEO_OUTPUT_DIR}/geosite.dat" -o "${MRS_TMP}/geosite"
+          for f in "${MRS_TMP}"/geoip/*.mrs; do
+            [ -e "$f" ] || { echo "Error: no geoip .mrs generated" >&2; ls -la "${MRS_TMP}/geoip" >&2; exit 1; }
+            cp "$f" "${GEO_OUTPUT_DIR}/geoip-$(basename "$f")"
+          done
+          for f in "${MRS_TMP}"/geosite/*.mrs; do
+            [ -e "$f" ] || { echo "Error: no geosite .mrs generated" >&2; ls -la "${MRS_TMP}/geosite" >&2; exit 1; }
+            cp "$f" "${GEO_OUTPUT_DIR}/geosite-$(basename "$f")"
+          done
+          echo "Generated mihomo MRS files:"
+          ls -lh "${GEO_OUTPUT_DIR}"/*.mrs
+      - uses: actions/upload-artifact@v6
+        with:
+          name: mrs
+          path: ${{ env.GEO_OUTPUT_DIR }}/*.mrs
+          overwrite: true
+  Commit:
+    needs: [GeoIP, GeoSite, MRS, Tools]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Clean up
+        run: |
+          rm -fr ${{ env.GEO_OUTPUT_DIR }}
+          mkdir -p ${{ env.GEO_OUTPUT_DIR }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: ${{ env.GEOIP_CONF_NAME }}
+          path: ${{ env.GEO_OUTPUT_DIR }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: ${{ env.GEOSITE_CONF_NAME }}
+          path: ${{ env.GEO_OUTPUT_DIR }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: mrs
+          path: ${{ env.GEO_OUTPUT_DIR }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: tools
+          path: ${{ env.TOOL_DIR }}
+      - name: Commit and Force Push (Orphan Branch)
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          chmod +x tool/yq tool/geoip tool/geosite tool/converter
+          GET_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S (UTC+8)')
+          git checkout --orphan latest_branch
+          git add -A
+          git commit -m "Auto Update: ${GET_TIME}"
+          git branch -D Files || true
+          git branch -m Files
+          git push -f origin Files
+  Upload:
+    needs: [GeoIP, GeoSite, MRS]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: ${{ env.GEOIP_CONF_NAME }}
+          path: ${{ env.GEO_OUTPUT_DIR }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: ${{ env.GEOSITE_CONF_NAME }}
+          path: ${{ env.GEO_OUTPUT_DIR }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: mrs
+          path: ${{ env.GEO_OUTPUT_DIR }}
+      - name: Force Push to External Repo
+        env:
+          TARGET_REPO: "MoexinCDN/Files"
+          TARGET_BRANCH: "GeoDat"
+          PUSH_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          GET_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S (UTC+8)')
+          shopt -s nullglob
+          files=("${GEO_OUTPUT_DIR}"/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "Error: ${GEO_OUTPUT_DIR} is empty, no artifacts to push" >&2
+            exit 1
+          fi
+          echo "Found ${#files[@]} artifact(s):"
+          printf '  %s\n' "${files[@]}"
+          rm -rf /tmp/push_repo
+          mkdir -p /tmp/push_repo
+          cd /tmp/push_repo
+          git init -q
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name  "github-actions[bot]"
+          cp -a "${GEO_OUTPUT_DIR}/." .
+          ls -la
+          git add -A
+          git commit -m "Auto Update: ${GET_TIME}"
+          git remote add target "https://x-access-token:${PUSH_TOKEN}@github.com/${TARGET_REPO}.git"
+          git push --force target "HEAD:${TARGET_BRANCH}"

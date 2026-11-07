@@ -1,0 +1,7 @@
+built_at=2026-11-07 18:59:28 (UTC+8)
+go_version=go version go1.27.3 linux/amd64
+runner_arch=x86_64
+yq: status=unchanged upstream_commit=4fdfdb4 sha256=0bff04731760c29ae43ef994a0d5ffec70144699c5016b334f3117e86b4ac9f5
+geoip: status=unchanged upstream_commit=0128188 sha256=e767e9bb039eb504e6c7540e80acbe572673befa6014ed351176d0a4934c8dd2
+geosite: status=updated upstream_commit=6766d09 sha256=bfec76f297c609f2ba2e1052990da13de2acef487d6f2f8c1afcc988e1167ffc
+converter: status=unchanged upstream_commit=7dea278 sha256=4401c0c91fff44d7a7a287f8546be4ece5ae789f2e4fdb422aa9b08771a31cb8
